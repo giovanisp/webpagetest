@@ -15,13 +15,14 @@ if( !isset($_REQUEST['tests']) && isset($_REQUEST['t']) )
         }
     }
 
+    $protocol = ((isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] == 'on') || (isset($_SERVER['HTTP_SSL']) && $_SERVER['HTTP_SSL'] == 'On')) ? 'https' : 'http';
     $host  = $_SERVER['HTTP_HOST'];
     $uri = $_SERVER['PHP_SELF'];
     $params = '';
     foreach( $_GET as $key => $value )
         if( $key != 't' )
             $params .= "&$key=" . urlencode($value);
-    header("Location: http://$host$uri?tests=$tests{$params}");
+    header("Location: $protocol://$host$uri?tests=$tests{$params}");
 }
 else
 {
@@ -29,7 +30,7 @@ else
     include 'common.inc';
     require_once('page_data.inc');
     include 'video/filmstrip.inc.php';  // include the common php shared across the filmstrip code
-    include 'object_detail.inc';
+    require_once('object_detail.inc');
     require_once('waterfall.inc');
 
     $page_keywords = array('Video','comparison','Webpagetest','Website Speed Test');
@@ -77,7 +78,11 @@ else
                 <script language="JavaScript">
                 setTimeout( "window.location.reload(true)", 10000 );
                 </script>
-            <?php } $gaTemplate = 'Visual Comparison'; include ('head.inc'); ?>
+            <?php
+                }
+                $gaTemplate = 'Visual Comparison';
+                include ('head.inc');
+            ?>
             <style type="text/css">
             <?php
                 $bgcolor = '000000';
@@ -102,6 +107,7 @@ else
                     width: 100%;
                     height: 100%;
                     padding-bottom: 1em;
+                    border-left: 1px solid #f00;
                 }
                 #videoContainer
                 {
@@ -267,6 +273,7 @@ else
                 <?php
                 $tab = 'Test Result';
                 $nosubheader = true;
+                $headerType = 'video';
                 $filmstrip = $_REQUEST['tests'];
                 include 'header.inc';
 
@@ -300,6 +307,8 @@ else
                     var position = $("#videoDiv").scrollLeft();
                     var viewable = $("#videoDiv").width();
                     var width = $("#video").width();
+                    if (thumbWidth && thumbWidth < width)
+                      width -= thumbWidth;
                     <?php
                     $padding = 250;
                     if (array_key_exists('hideurls', $_REQUEST) && $_REQUEST['hideurls'])
@@ -397,7 +406,9 @@ function ScreenShotTable()
             // Print out a link to edit the test
             echo '<br/>';
             echo '<a href="#" class="editLabel" data-test-guid="' . $test['id'] . '" data-current-label="' . htmlentities($test['name']) . '">';
-            echo '(Edit)</a>';
+            if (class_exists("SQLite3"))
+              echo '(Edit)';
+            echo '</a>';
 
             echo "</td></tr>\n";
         }
@@ -417,6 +428,7 @@ function ScreenShotTable()
         echo "</tr></thead><tbody>\n";
 
         $firstFrame = 0;
+        $maxThumbWidth = 0;
         foreach($tests as &$test) {
             $aft = (int)$test['aft'] / 100;
 
@@ -432,6 +444,7 @@ function ScreenShotTable()
                     $width = (int)(((float)$thumbSize / (float)$test['video']['height']) * (float)$test['video']['width']);
                 }
             }
+            $maxThumbWidth = max($maxThumbWidth, $width);
             echo "<tr>";
 
             $testEnd = ceil($test['video']['end'] / $interval) * $interval;
@@ -625,9 +638,10 @@ function ScreenShotTable()
         <?php
         } // EMBED
         // scroll the table to show the first thumbnail change
-        $scrollPos = $firstFrame * ($thumbSize + 8);
+        $scrollPos = $firstFrame * ($maxThumbWidth + 6);
         ?>
         <script language="javascript">
+            var thumbWidth = <?php echo "$maxThumbWidth;"; ?>
             var scrollPos = <?php echo "$scrollPos;"; ?>
             document.getElementById("videoDiv").scrollLeft = scrollPos;
         </script>
@@ -683,19 +697,18 @@ function DisplayGraphs() {
     global $tests;
     global $filmstrip_end_frame;
     require_once('breakdown.inc');
-    $mimeTypes = array('html', 'js', 'css', 'text', 'image', 'flash', 'other');
+    $mimeTypes = array('html', 'js', 'css', 'image', 'flash', 'font', 'other');
     $timeMetrics = array('visualComplete' => 'Visually Complete',
-                        'VisuallyCompleteDT' => 'Visually Complete (Dev Tools)',
+                        'lastVisualChange' => 'Last Visual Change',
                         'docTime' => 'Load Time (onload)',
                         'fullyLoaded' => 'Load Time (Fully Loaded)',
+                        'domContentLoadedEventStart' => 'DOM Content Loaded',
                         'SpeedIndex' => 'Speed Index',
-                        'SpeedIndexDT' => 'Speed Index (Dev Tools)',
                         'TTFB' => 'Time to First Byte',
                         'titleTime' => 'Time to Title',
                         'render' => 'Time to Start Render',
                         'fullyLoadedCPUms' => 'CPU Busy Time');
     $progress_end = 0;
-    $has_speed_index_dt = false;
     $testCount = count($tests);
     foreach($tests as &$test) {
         $requests;
@@ -708,31 +721,24 @@ function DisplayGraphs() {
                 }
             }
         }
-        if (array_key_exists('progress', $test['video']) &&
-            array_key_exists('DevTools', $test['video']['progress']) &&
-            array_key_exists('VisualProgress', $test['video']['progress']['DevTools'])) {
-            $has_speed_index_dt = true;
-            foreach ($test['video']['progress']['DevTools']['VisualProgress'] as $ms => &$data) {
-                if ($ms > $progress_end) {
-                    $progress_end = $ms;
-                }
-            }
-        }
-    }
-    if (!$has_speed_index_dt) {
-        unset($timeMetrics['VisuallyCompleteDT']);
-        unset($timeMetrics['SpeedIndexDT']);
     }
     if ($progress_end) {
         if ($progress_end % 100)
             $progress_end = intval((intval($progress_end / 100) + 1) * 100);
         echo '<div id="compare_visual_progress" class="compare-graph"></div>';
-        if ($has_speed_index_dt && $testCount > 1)
-            echo '<div id="compare_visual_progress_dt" class="compare-graph"></div>';
     }
-    echo '<div id="compare_times" class="compare-graph"></div>';
-    echo '<div id="compare_requests" class="compare-graph"></div>';
-    echo '<div id="compare_bytes" class="compare-graph"></div>';
+    if (count($tests) <= 4) {
+      echo '<div id="compare_times" class="compare-graph"></div>';
+      echo '<div id="compare_requests" class="compare-graph"></div>';
+      echo '<div id="compare_bytes" class="compare-graph"></div>';
+    } else {
+      foreach($timeMetrics as $metric => $label)
+        echo "<div id=\"compare_times_$metric\" class=\"compare-graph\"></div>";
+      foreach($mimeTypes as $type) {
+        echo "<div id=\"compare_requests_$type\" class=\"compare-graph\"></div>";
+        echo "<div id=\"compare_bytes_$type\" class=\"compare-graph\"></div>";
+      }
+    }
     ?>
     <script type="text/javascript" src="<?php echo $GLOBALS['ptotocol']; ?>://www.google.com/jsapi"></script>
     <script type="text/javascript">
@@ -759,10 +765,6 @@ function DisplayGraphs() {
                 echo "  ['Time (ms)'";
                 foreach($tests as &$test)
                     echo ", '{$test['name']}'";
-                if ($has_speed_index_dt && $testCount == 1) {
-                    foreach($tests as &$test)
-                        echo ", '{$test['name']} (Dev Tools)'";
-                }
                 echo " ]";
                 for ($ms = 0; $ms <= $progress_end; $ms += 100) {
                     echo ",\n  ['" . number_format($ms / 1000, 1) . "'";
@@ -787,49 +789,9 @@ function DisplayGraphs() {
                         }
                         echo ", $progress";
                     }
-                    if ($has_speed_index_dt && $testCount == 1) {
-                        foreach($tests as &$test) {
-                            $progress = 0;
-                            if (array_key_exists('video', $test) &&
-                                array_key_exists('progress', $test['video']) &&
-                                array_key_exists('DevTools', $test['video']['progress']) &&
-                                array_key_exists('VisualProgress', $test['video']['progress']['DevTools'])) {
-                                foreach ($test['video']['progress']['DevTools']['VisualProgress'] as $time => &$visualProgress) {
-                                    if ($time <= $ms)
-                                        $progress = floatval($visualProgress) * 100;
-                                }
-                            }
-                            echo ", $progress";
-                        }
-                    }
                     echo "]";
                 }
                 echo "]);\n";
-                if ($has_speed_index_dt && $testCount > 1) {
-                    echo "var dataProgressDT = google.visualization.arrayToDataTable([\n";
-                    echo "  ['Time (ms)'";
-                    foreach($tests as &$test)
-                        echo ", '{$test['name']}'";
-                    echo " ]";
-                    for ($ms = 0; $ms <= $progress_end; $ms += 100) {
-                        echo ",\n  ['" . number_format($ms / 1000, 1) . "'";
-                        foreach($tests as &$test) {
-                            $progress = 0;
-                            if (array_key_exists('video', $test) &&
-                                array_key_exists('progress', $test['video']) &&
-                                array_key_exists('DevTools', $test['video']['progress']) &&
-                                array_key_exists('VisualProgress', $test['video']['progress']['DevTools'])) {
-                                foreach ($test['video']['progress']['DevTools']['VisualProgress'] as $time => &$visualProgress) {
-                                    if ($time <= $ms)
-                                        $progress = floatval($visualProgress) * 100;
-                                }
-                            }
-                            echo ", $progress";
-                        }
-                        echo "]";
-                    }
-                    echo "]);\n";
-                }
             }
             $row = 0;
             foreach($timeMetrics as $metric => $label) {
@@ -847,6 +809,12 @@ function DisplayGraphs() {
                     $column++;
                 }
                 $row++;
+            }
+            $row = 0;
+            foreach($timeMetrics as $metric => $label) {
+              echo "var dataTimes$metric = new google.visualization.DataView(dataTimes);\n";
+              echo "dataTimes$metric.setRows($row, $row);\n";
+              $row++;
             }
             echo "dataRequests.setValue(0, 0, 'Total');\n";
             echo "dataBytes.setValue(0, 0, 'Total');\n";
@@ -878,23 +846,38 @@ function DisplayGraphs() {
                 }
                 $row++;
             }
+            $row = 1;
+            foreach($mimeTypes as $mimeType) {
+              echo "var dataRequests$mimeType = new google.visualization.DataView(dataRequests);\n";
+              echo "dataRequests$mimeType.setRows($row, $row);\n";
+              echo "var dataBytes$mimeType = new google.visualization.DataView(dataBytes);\n";
+              echo "dataBytes$mimeType.setRows($row, $row);\n";
+              $row++;
+            }
             if ($progress_end) {
                 echo "var progressChart = new google.visualization.LineChart(document.getElementById('compare_visual_progress'));\n";
                 echo "progressChart.draw(dataProgress, {title: 'Visual Progress (%)', hAxis: {title: 'Time (seconds)'}});\n";
-                if ($has_speed_index_dt && $testCount > 1) {
-                    echo "var progressChartDT = new google.visualization.LineChart(document.getElementById('compare_visual_progress_dt'));\n";
-                    echo "progressChartDT.draw(dataProgressDT, {title: 'Visual Progress - Dev Tools (%)', hAxis: {title: 'Time (seconds)'}});\n";
-                }
+            }
+            if (count($tests) <= 4) {
+              echo "var timesChart = new google.visualization.ColumnChart(document.getElementById('compare_times'));\n";
+              echo "timesChart.draw(dataTimes, {title: 'Timings (ms)'});\n";
+              echo "var requestsChart = new google.visualization.ColumnChart(document.getElementById('compare_requests'));\n";
+              echo "requestsChart.draw(dataRequests, {title: 'Requests'});\n";
+              echo "var bytesChart = new google.visualization.ColumnChart(document.getElementById('compare_bytes'));\n";
+              echo "bytesChart.draw(dataBytes, {title: 'Bytes'});\n";
+            } else {
+              foreach($timeMetrics as $metric => $label) {
+                echo "var timesChart$metric = new google.visualization.ColumnChart(document.getElementById('compare_times_$metric'));\n";
+                echo "timesChart$metric.draw(dataTimes$metric, {title: '$label (ms)'});\n";
+              }
+              foreach($mimeTypes as $type) {
+                echo "var requestsChart$type = new google.visualization.ColumnChart(document.getElementById('compare_requests_$type'));\n";
+                echo "requestsChart$type.draw(dataRequests$type, {title: '$type Requests'});\n";
+                echo "var bytesChart$type = new google.visualization.ColumnChart(document.getElementById('compare_bytes_$type'));\n";
+                echo "bytesChart$type.draw(dataBytes$type, {title: '$type Bytes'});\n";
+              }
             }
             ?>
-            var timesChart = new google.visualization.ColumnChart(document.getElementById('compare_times'));
-            timesChart.draw(dataTimes, {title: 'Timings (ms)'});
-
-            var requestsChart = new google.visualization.ColumnChart(document.getElementById('compare_requests'));
-            requestsChart.draw(dataRequests, {title: 'Requests'});
-
-            var bytesChart = new google.visualization.ColumnChart(document.getElementById('compare_bytes'));
-            bytesChart.draw(dataBytes, {title: 'Bytes'});
         }
     </script>
     <?php

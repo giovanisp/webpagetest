@@ -67,9 +67,7 @@ if (!defined('EMBED')) {
         {
             // see if we have a location that the test was run from (for a custom ad)
             $testLoc = null;
-            if( isset($adLoc) )
-                $testLoc = $adLoc;
-            elseif( isset($test) && isset($test['test']) && isset($test['test']['loc']) )
+            if( isset($test) && isset($test['test']['loc']) )
                 $testLoc = $test['test']['loc'];
             
             if( strpos($testLoc, '..') === false && strpos($testLoc, '/') === false && strpos($testLoc, '\\') === false && 
@@ -131,44 +129,6 @@ if (!defined('EMBED')) {
                     $opens = ' (opens in a new tab)';
                 }
                 echo "<li$current><a title=\"$tabName$opens\" href=\"$tabUrl\"$target>$tabName</a></li>";
-            }
-        }
-
-        if (!$privateInstall && $_SERVER['HTTP_SSL'] != 'On' && (!defined('NAV_NO_SHARE') || !NAV_NO_SHARE))
-        {
-            echo '<div class="gplusone"><g:plusone size="medium" count="false" href="http://www.webpagetest.org/" actions="+1,addtocircles"></g:plusone>&nbsp;
-                <a href="http://twitter.com/share" class="twitter-share-button" data-count="none" data-text=" "></a>
-                ';
-            if (!array_key_exists('slow', $_REQUEST)) {
-                echo '<script type="text/javascript">
-                        (function() {
-                            var po = document.createElement(\'script\'); po.type = \'text/javascript\'; po.async = true;
-                            po.src = \'https://apis.google.com/js/plusone.js\';
-                            var tw = document.createElement(\'script\'); tw.type = \'text/javascript\'; tw.async = true;
-                            tw.src = \'http://platform.twitter.com/widgets.js\';
-                            var s = document.getElementsByTagName(\'script\')[0]; 
-                            s.parentNode.insertBefore(po, s);
-                            s.parentNode.insertBefore(tw, s);
-                          })();
-                  </script></div>
-                  ';
-            } else {
-                echo '<script type="text/javascript">
-                        (function() {
-                            var po = document.createElement(\'script\'); po.type = \'text/javascript\'; po.async = true;
-                            po.src = \'https://apis.google.com/js/plusone.js\';
-                            var s = document.getElementsByTagName(\'script\')[0]; 
-                            s.parentNode.insertBefore(po, s);
-                          })();
-                  </script></div>
-                  ';
-                if ($_REQUEST['slow'] !== 'bottom') {
-                    $delay = 10;
-                    if (array_key_exists('delay', $_REQUEST)) {
-                        $delay = $_REQUEST['delay'];
-                    }
-                    echo "<script type=\"text/javascript\" src=\"/slowtweet.php?delay=$delay\"></script>";
-                }
             }
         }
 ?></ul>
@@ -313,10 +273,7 @@ if( !strcasecmp('Test Result', $tab) && !@$nosubheader && !defined('EMBED') )
             $tabs['PageSpeed'] = "/pagespeed.php?test=$id&run=$gradeRun&cached=$cached$end";
         $tabs['Content Breakdown'] = "/breakdown.php?test=$id&run=$gradeRun&cached=$cached$end";
         $tabs['Domains'] = "/domains.php?test=$id&run=$gradeRun&cached=$cached$end";
-        if (array_key_exists('testinfo', $test) &&
-            array_key_exists('timeline', $test['testinfo']) &&
-            $test['testinfo']['timeline'] &&
-            gz_is_file("$testPath/$gradeRun{$cTxt2}_devtools.json"))
+        if (gz_is_file("$testPath/$gradeRun{$cTxt2}_devtools.json"))
             $tabs['Processing Breakdown'] = "/breakdownTimeline.php?test=$id&run=$gradeRun&cached=$cached$end";
         
         if( !isset($test['testinfo']) || !$test['testinfo']['noimages'] )
@@ -377,8 +334,8 @@ function GetGrades(&$pageData, &$test, $id, $run)
         $grades['keep_alive_enabled'] = array( 'class' => $opt['keep-alive']['class'], 'grade' => $opt['keep-alive']['grade'], 'description' => $opt['keep-alive']['label']);
         $grades['compress_text'] = array( 'class' => $opt['gzip']['class'], 'grade' => $opt['gzip']['grade'], 'description' => $opt['gzip']['label']);
         $grades['compress_images'] = array( 'class' => $opt['image_compression']['class'], 'grade' => $opt['image_compression']['grade'], 'description' => $opt['image_compression']['label']);
-        if (array_key_exists('progressive_jpeg', $opt))
-          $grades['progressive_jpeg'] = array( 'class' => $opt['progressive_jpeg']['class'], 'grade' => $opt['progressive_jpeg']['grade'], 'description' => $opt['progressive_jpeg']['label']);
+        //if (array_key_exists('progressive_jpeg', $opt))
+        //  $grades['progressive_jpeg'] = array( 'class' => $opt['progressive_jpeg']['class'], 'grade' => $opt['progressive_jpeg']['grade'], 'description' => $opt['progressive_jpeg']['label']);
         $grades['cache_static_content'] = array( 'class' => $opt['caching']['class'], 'grade' => $opt['caching']['grade'], 'description' => $opt['caching']['label']);
         $grades['use_of_cdn'] = array( 'class' => $opt['cdn']['class'], 'grade' => $opt['cdn']['grade'], 'description' => $opt['cdn']['label']);
     }

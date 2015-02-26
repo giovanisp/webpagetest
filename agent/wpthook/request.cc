@@ -372,7 +372,6 @@ void Request::DataIn(DataChunk& chunk) {
   EnterCriticalSection(&cs);
   if (_is_active) {
     QueryPerformanceCounter(&_end);
-    _test_state.received_data_ = true;
     if (!_first_byte.QuadPart)
       _first_byte.QuadPart = _end.QuadPart;
     if (!_is_spdy) {
@@ -445,7 +444,7 @@ void Request::MatchConnections() {
   EnterCriticalSection(&cs);
   if (_is_active && !_from_browser) {
     if (!_dns_start.QuadPart) {
-      CString host = CA2T(GetHost());
+      CString host = CA2T(GetHost(), CP_UTF8);
       _dns.Claim(host, _peer_address, _start, _dns_start, _dns_end);
     }
     if (!_connect_start.QuadPart)
@@ -492,7 +491,7 @@ bool Request::Process() {
     if (!_test_state._first_byte.QuadPart && result == 200 && 
         _first_byte.QuadPart )
       _test_state._first_byte.QuadPart = _first_byte.QuadPart;
-    if (result >= 400 || result < 0) {
+    if (result != 401 && (result >= 400 || result < 0)) {
       if (_test_state._test_result == TEST_RESULT_NO_ERROR)
         _test_state._test_result = TEST_RESULT_CONTENT_ERROR;
       else if (_test_state._test_result == TEST_RESULT_TIMEOUT)
@@ -501,14 +500,14 @@ bool Request::Process() {
 
     CStringA user_agent = GetRequestHeader("User-Agent");
     if (user_agent.GetLength())
-      _test_state._user_agent = CA2T(user_agent);
+      _test_state._user_agent = CA2T(user_agent, CP_UTF8);
 
     // see if we have a matching request with browser data
     CString url = _T("http://");
     if (_is_ssl)
       url = _T("https://");
-    url += CA2T(GetHost());
-    url += CA2T(_request_data.GetObject());
+    url += CA2T(GetHost(), CP_UTF8);
+    url += CA2T(_request_data.GetObject(), CP_UTF8);
     if (!_from_browser) {
       BrowserRequestData data(url);
       if (requests_.GetBrowserRequest(data)) {

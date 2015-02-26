@@ -9,34 +9,37 @@ require_once('devtools.inc.php');
 * @param mixed $run
 * @param mixed $cached
 */
-function loadAllPageData($testPath, $options = null)
-{
-    $ret = array();
-    
-    // go in order for the number of runs there are supposed to be
-    if (is_file("$testPath/testinfo.ini")) {
-      $ini = parse_ini_file("$testPath/testinfo.ini", true);
-      if( gz_is_file("$testPath/testinfo.json") )
-          $ini['testinfo'] = json_decode(gz_file_get_contents("$testPath/testinfo.json"), true);
-      $runs = $ini['test']['runs'];
-      $fvonly = $ini['test']['fvonly'];
-      for( $run = 1; $run <= $runs; $run++ )
-      {
-          $data = loadPageRunData($testPath, $run, 0, $options);
+function loadAllPageData($testPath, $options = null) {
+  $ret = array();
+  
+  // go in order for the number of runs there are supposed to be
+  if (is_file("$testPath/testinfo.ini")) {
+    $ini = parse_ini_file("$testPath/testinfo.ini", true);
+    $runs = $ini['test']['runs'];
+    $fvonly = $ini['test']['fvonly'];
+    $testInfo = GetTestInfo($testPath);
+    $completed = true;
+    if ($testInfo && (!array_key_exists('completed', $testInfo) || !$testInfo['completed']))
+      $completed = false;
+      
+    for( $run = 1; $run <= $runs; $run++ ) {
+      // only load page data for individual runs that are complete (or if the whole test is complete)
+      if ($completed || !$testInfo || IsTestRunComplete($run, $testInfo)) {
+        $data = loadPageRunData($testPath, $run, 0, $options);
+        if( isset($data) )
+          $ret[$run][0] = $data;
+        
+        if( !$fvonly ) {
+          unset( $data );
+          $data = loadPageRunData($testPath, $run, 1, $options);
           if( isset($data) )
-              $ret[$run][0] = $data;
-          
-          if( !$fvonly )
-          {
-              unset( $data );
-              $data = loadPageRunData($testPath, $run, 1, $options);
-              if( isset($data) )
-                  $ret[$run][1] = $data;
-          }
+            $ret[$run][1] = $data;
+        }
       }
     }
-    
-    return $ret;
+  }
+  
+  return $ret;
 }
 
 /**
@@ -51,12 +54,10 @@ function loadPageRunData($testPath, $run, $cached, $options = null)
 {
     $ret = null;
 
-    if( $cached )
-        $ret = loadPageData("$testPath/{$run}_Cached_IEWPG.txt", $options);
-    else
-        $ret = loadPageData("$testPath/{$run}_IEWPG.txt", $options);
+    $cachedText = $cached ? '_Cached' : '';
+    $ret = loadPageData("$testPath/{$run}{$cachedText}_IEWPG.txt", $options);
     if (!isset($ret) || !is_array($ret) || !count($ret))
-        GetDevToolsRequests($testPath, $run, $cached, $requests, $ret);
+      GetDevToolsRequests($testPath, $run, $cached, $requests, $ret);
     
     // see if we have video files to calculate a visually complete time from
     $basic_results = false;
@@ -65,6 +66,41 @@ function loadPageRunData($testPath, $run, $cached, $options = null)
     if (isset($ret) && !$basic_results) {
         $startOffset = array_key_exists('testStartOffset', $ret) ? intval(round($ret['testStartOffset'])) : 0;
         loadUserTimingData($ret, $testPath, $run, $cached);
+
+        // see if we have custom metrics to load
+        if (gz_is_file("$testPath/{$run}{$cachedText}_metrics.json")) {
+          $custom_metrics = json_decode(gz_file_get_contents("$testPath/{$run}{$cachedText}_metrics.json"), true);
+          if ($custom_metrics && is_array($custom_metrics) && count($custom_metrics)) {
+            $ret["custom"] = array();
+            foreach ($custom_metrics as $metric => $value) {
+              if (preg_match('/^[0-9]+$/', $value))
+                $ret[$metric] = intval($value);
+              elseif (preg_match('/^[0-9]*\.[0-9]+$/', $value))
+                $ret[$metric] = floatval($value);
+              else
+                $ret[$metric] = $value;
+              $ret["custom"][] = $metric;
+            }
+          }
+        }
+        
+        // see if we have CSI metrics to load
+        if (is_dir('./google') && is_file('./google/google_lib.inc')) {
+          require_once('google/google_lib.inc');
+          $csi = ParseCsiInfo(0, $testPath, $run, $cached, true, false);
+          if (isset($csi) && is_array($csi) && count($csi)) {
+            $ret['CSI'] = array();
+            foreach($csi as $metric => $value) {
+              if (preg_match('/^[0-9]+$/', $value))
+                $value = intval($value);
+              elseif (preg_match('/^[0-9\.]+$/', $value))
+                $value = floatval($value);
+              $ret["CSI.$metric"] = $value;
+              $ret['CSI'][] = $metric;
+            }
+          }
+        }
+
         if (array_key_exists('loadTime', $ret) &&
             !$ret['loadTime'] &&
             array_key_exists('fullyLoaded', $ret) &&
@@ -105,19 +141,6 @@ function loadPageRunData($testPath, $run, $cached, $options = null)
                 $ret['visualComplete'] = $progress['visualComplete'];
             if (array_key_exists('startRender', $progress) && (!array_key_exists('render', $ret) || !$ret['render']))
                 $ret['render'] = $progress['startRender'];
-            if (array_key_exists('DevTools', $progress) && is_array($progress['DevTools'])) {
-                if (array_key_exists('SpeedIndex', $progress['DevTools'])) {
-                    $ret['SpeedIndexDT'] = intval($progress['DevTools']['SpeedIndex']);
-                    if (!array_key_exists('SpeedIndex', $ret))
-                        $ret['SpeedIndex'] = $ret['SpeedIndexDT'];
-                }
-                if (array_key_exists('VisuallyComplete', $progress['DevTools'])) {
-                    $ret['VisuallyCompleteDT'] = $progress['DevTools']['VisuallyComplete'];
-                }
-                if (array_key_exists('StartRender', $progress['DevTools'])) {
-                    $ret['renderDT'] = $progress['DevTools']['StartRender'];
-                }
-            }
             if ((!array_key_exists('lastVisualChange', $ret) ||
                  !$ret['lastVisualChange']) &&
                 array_key_exists('visualComplete', $ret))
@@ -134,9 +157,25 @@ function loadPageRunData($testPath, $run, $cached, $options = null)
                 $ret['visualCompleteCustom'] = $progress['visualComplete'];
             }
         }
+
+        if (isset($ret) && is_array($ret) && isset($ret['fullyLoaded']) && $ret['fullyLoaded']) {
+          $processing = GetDevToolsCPUTime($testPath, $run, $cached, $ret['fullyLoaded']);
+          if (isset($processing) && is_array($processing) && count($processing)) {
+            $ret['cpuTimes'] = $processing;
+            if (isset($ret['docTime']) && $ret['docTime']) {
+              $processing = GetDevToolsCPUTime($testPath, $run, $cached, $ret['docTime']);
+              if (isset($processing) && is_array($processing) && count($processing)) {
+                $ret['cpuTimesDoc'] = $processing;
+              }
+            }
+          }
+        }
     }
 
     if (isset($ret)) {
+        $ret['run'] = $run;
+        $ret['cached'] = $cached;
+        
         // calculate the effective bps
         if (array_key_exists('fullyLoaded', $ret) &&
             array_key_exists('TTFB', $ret) &&
@@ -298,18 +337,21 @@ function calculatePageStats(&$pageData, &$fv, &$rv)
                 if (!isset($metrics)) {
                     $metrics = array();
                     foreach ($data[0] as $metric => $value)
+                      if (is_numeric($value))
                         $metrics[] = $metric;
                 }
                 // only look at non-error runs
-                if( $data[0]['result'] === 0 || $data[0]['result'] === 99999 )
+                if( successfulRun($data[0]) )
                 {
                     if( !isset($fv) )
                         $fv = array();
                     foreach ($metrics as $metric) {
+                      if (is_numeric($data[0][$metric])) {
                         if (array_key_exists($metric, $fv))
                             $fv[$metric] += $data[0][$metric];
                         else
                             $fv[$metric] = $data[0][$metric];
+                      }
                     }
                     $fvCount++;
                 }
@@ -320,18 +362,21 @@ function calculatePageStats(&$pageData, &$fv, &$rv)
                 if (!isset($metrics)) {
                     $metrics = array();
                     foreach ($data[0] as $metric => $value)
+                      if (is_numeric($value))
                         $metrics[] = $metric;
                 }
                 // only look at non-error runs
-                if( $data[1]['result'] === 0 || $data[1]['result'] === 99999 )
+                if( successfulRun($data[1]) )
                 {
                     if( !isset($rv) )
                         $rv = array();
                     foreach ($metrics as $metric) {
+                      if (is_numeric($data[1][$metric])) {
                         if (array_key_exists($metric, $rv))
                             $rv[$metric] += $data[1][$metric];
                         else
                             $rv[$metric] = $data[1][$metric];
+                      }
                     }
                     $rvCount++;
                 }
@@ -343,6 +388,7 @@ function calculatePageStats(&$pageData, &$fv, &$rv)
     if( isset($fv) && isset($metrics) && $fvCount > 0 )
     {
         foreach ($metrics as $metric)
+          if (is_numeric($fv[$metric]))
             $fv[$metric] /= (double)$fvCount;
         
         // go through and find the run closest to the average
@@ -351,7 +397,7 @@ function calculatePageStats(&$pageData, &$fv, &$rv)
 
         foreach( $pageData as $run => $data )
         {
-            if( isset($data[0]) && ($data[0]['result'] === 0 || $data[0]['result'] === 99999) )
+            if( isset($data[0]) && successfulRun($data[0]) )
             {
                 $curDist = abs($data[0]['loadTime'] - $fv['loadTime']);
                 if( $curDist < $distance )
@@ -370,6 +416,7 @@ function calculatePageStats(&$pageData, &$fv, &$rv)
     if( isset($rv) && isset($metrics) && $rvCount > 0 )
     {
         foreach ($metrics as $metric)
+          if (is_numeric($rv[$metric]))
             $rv[$metric] /= (double)$rvCount;
         
         // go through and find the run closest to the average
@@ -378,7 +425,7 @@ function calculatePageStats(&$pageData, &$fv, &$rv)
 
         foreach( $pageData as $run => $data )
         {
-            if( isset($data[1]) && ($data[1]['result'] === 0 || $data[1]['result'] === 99999) )
+            if( isset($data[1]) && successfulRun($data[1]) )
             {
                 $curDist = abs($data[1]['loadTime'] - $rv['loadTime']);
                 if( $curDist < $distance )
@@ -395,7 +442,10 @@ function calculatePageStats(&$pageData, &$fv, &$rv)
 }
 
 /**
-* Find the test run closest to the median
+ * Find the index of the test run in $pageData with cache status $cached
+ * corresponding to the median (or lower of two middle values) of $metric,
+ * unless the "medianRun" parameter is set to "fastest",
+ * in which case it returns the index of the fastest run.
 * 
 * @param mixed $pageData
 * @param mixed $cached
@@ -403,25 +453,10 @@ function calculatePageStats(&$pageData, &$fv, &$rv)
 function GetMedianRun(&$pageData, $cached, $metric = 'loadTime') {
     $run = 0;
     $cached = $cached ? 1:0;
-    $times = array();
-    
-    // try successful-only runs first
-    foreach( $pageData as $index => &$pageRun ) {
-        if( array_key_exists($cached, $pageRun) && 
-            array_key_exists('result', $pageRun[$cached]) && 
-            array_key_exists($metric, $pageRun[$cached]) &&
-            ($pageRun[$cached]['result'] == 0 || $pageRun[$cached]['result'] == 99999) ) {
-            $times[$index] = $pageRun[$cached][$metric];
-        }
-    }
+    $times = values($pageData, $cached, $metric, true);
             
     if (!count($times)) {
-        // include error runs
-        foreach( $pageData as $index => &$pageRun ) {
-            if( array_key_exists($cached, $pageRun) && array_key_exists($metric, $pageRun[$cached])) {
-                $times[$index] = $pageRun[$cached][$metric];
-            }
-        }
+      $times = values($pageData, $cached, $metric, false);
     }
     
     $count = count($times);
@@ -467,7 +502,7 @@ function CountSuccessfulTests(&$pageData, $cached)
     $count = 0;
     foreach( $pageData as &$run )
     {
-        if( $run[$cached]['result'] === 0 || $run[$cached]['result'] === 99999 )
+        if( successfulRun($run[$cached]) )
             $count++;
     }
     
@@ -492,16 +527,10 @@ function CalculateAggregateStats(&$pageData, $cached, $metric, &$median, &$avg, 
     $count = 0;
     
     // first pass, calculate the average and array of values for grabbing the median
-    $values = array();
-    $sum = 0;
-    foreach( $pageData as &$run ) {
-        if( ($run[$cached]['result'] === 0 || $run[$cached]['result'] === 99999) && array_key_exists($metric, $run[$cached]) ) {
-            $values[] = $run[$cached][$metric];
-            $sum += $run[$cached][$metric];
-            $count++;
-        }
-    }
-    
+    $values = values($pageData, $cached, $metric, true);
+    $sum = array_sum($values);
+    $count = count($values);
+
     if( $count ) {
         $avg = $sum / $count;
         sort($values, SORT_NUMERIC);
@@ -531,8 +560,7 @@ function PageDataStandardDeviation($pageData, $metric, $cached) {
             if( array_key_exists($cached, $data) &&
                 array_key_exists($metric,$data[$cached]) &&
                 array_key_exists('result', $data[$cached]) &&
-                ($data[$cached]['result'] === 0 ||
-                 $data[$cached]['result'] === 99999))
+                successfulRun($data[$cached]))
                 $values[] = $data[$cached][$metric];
         }
     }
@@ -576,6 +604,9 @@ function loadUserTimingData(&$pageData, $testPath, $run, $cached) {
             if ($event['startTime'] > $lastEvent)
               $lastEvent = $event['startTime'];
             $pageData["userTime.$name"] = $time;
+            if (!isset($pageData['userTimes']))
+              $pageData['userTimes'] = array();
+            $pageData['userTimes'][$name] = $time;
           }
         }
       }
@@ -583,4 +614,38 @@ function loadUserTimingData(&$pageData, $testPath, $run, $cached) {
     }
   }
 }
+
+/**
+ * Return whether a particular run (cached or uncached) was successful.
+ *
+ * @param mixed data
+ *
+ * @return bool
+ */
+function successfulRun($data) {
+  return ($data['result'] === 0 || $data['result']  === 99999);
+}
+
+/**
+ * Return all values from a pageData for a given cached state and metric
+ *
+ * @param mixed pageData
+ * @param int cached
+ * @param string metric
+ * @param bool successfulOnly Whether to only include successful runs
+ *
+ * @return (int|float)[]
+ */
+function values(&$pageData, $cached, $metric, $successfulOnly) {
+  $values = array();
+  foreach( $pageData as $index => &$pageRun ) {
+    if( array_key_exists($cached, $pageRun) &&
+      (!$successfulOnly || successfulRun($pageRun[$cached])) &&
+      array_key_exists($metric, $pageRun[$cached]) ) {
+        $values[$index] = $pageRun[$cached][$metric];
+    }
+  }
+  return $values;
+}
+
 ?>

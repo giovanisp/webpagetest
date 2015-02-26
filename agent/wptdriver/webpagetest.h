@@ -38,6 +38,7 @@ public:
 
   bool _exit;
   bool has_gpu_;
+  bool rebooting_;
 
 private:
   WptSettings&  _settings;
@@ -54,7 +55,7 @@ private:
   bool ParseTest(CString& test_string, WptTestDriver& test);
   bool CrackUrl(CString url, CString &host, unsigned short &port, 
                 CString& object, DWORD &secure_flag);
-  bool BuildFormData(WptSettings& settings, WptTestDriver& test, 
+  void BuildFormData(WptSettings& settings, WptTestDriver& test, 
                      bool done,
                      CString file_name, DWORD file_size,
                      CString& headers, CStringA& footer, 

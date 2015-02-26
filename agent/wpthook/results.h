@@ -107,6 +107,8 @@ private:
   void SaveResponseBodies(void);
   void SaveConsoleLog(void);
   void SaveTimedEvents(void);
-  void SaveHistogram(CxImage& image, CString file);
+  void SaveCustomMetrics(void);
+  void SaveHistogram(CStringA& histogram, CString file);
+  CStringA GetHistogramJSON(CxImage& image);
   bool NativeRequestExists(Request * browser_request);
 };

@@ -30,6 +30,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "test_server.h"
 #include "wpthook.h"
 #include "wpt_test_hook.h"
+#include "shared_mem.h"
 #include "mongoose/mongoose.h"
 #include "test_state.h"
 #include "dev_tools.h"
@@ -40,6 +41,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 static TestServer * _globaltest__server = NULL;
 
 // definitions
+static const TCHAR * BROWSER_STARTED_EVENT = _T("Global\\wpt_browser_started");
+static const TCHAR * BROWSER_DONE_EVENT = _T("Global\\wpt_browser_done");
 static const DWORD RESPONSE_OK = 200;
 static const char * RESPONSE_OK_STR = "OK";
 
@@ -74,8 +77,14 @@ TestServer::TestServer(WptHook& hook, WptTestHook &test, TestState& test_state,
   ,test_state_(test_state)
   ,requests_(requests)
   ,dev_tools_(dev_tools)
-  ,trace_(trace) {
+  ,trace_(trace)
+  ,started_(false) {
   InitializeCriticalSection(&cs);
+  last_cpu_idle_.QuadPart = 0;
+  last_cpu_kernel_.QuadPart = 0;
+  last_cpu_user_.QuadPart = 0;
+  start_check_time_.QuadPart = 0;
+  QueryPerformanceFrequency(&start_check_freq_);
 }
 
 /*-----------------------------------------------------------------------------
@@ -127,6 +136,12 @@ void TestServer::Stop(void){
     mg_stop(mongoose_context_);
     mongoose_context_ = NULL;
   }
+  HANDLE browser_done_event = OpenEvent(EVENT_MODIFY_STATE , FALSE,
+                                        BROWSER_DONE_EVENT);
+  if (browser_done_event) {
+    SetEvent(browser_done_event);
+    CloseHandle(browser_done_event);
+  }
   _globaltest__server = NULL;
 }
 
@@ -141,15 +156,17 @@ void TestServer::MongooseCallback(enum mg_event event,
   if (event == MG_NEW_REQUEST) {
     //OutputDebugStringA(CStringA(request_info->uri) + CStringA("?") + request_info->query_string);
     WptTrace(loglevel::kFrequentEvent, _T("[wpthook] HTTP Request: %s\n"), 
-                    (LPCTSTR)CA2T(request_info->uri));
+                    (LPCTSTR)CA2T(request_info->uri, CP_UTF8));
     WptTrace(loglevel::kFrequentEvent, _T("[wpthook] HTTP Query String: %s\n"), 
-                    (LPCTSTR)CA2T(request_info->query_string));
+                    (LPCTSTR)CA2T(request_info->query_string, CP_UTF8));
     if (strcmp(request_info->uri, "/task") == 0) {
       CStringA task;
-      bool record = false;
-      test_.GetNextTask(task, record);
-      if (record)
-        hook_.Start();
+      if (OkToStart()) {
+        bool record = false;
+        test_.GetNextTask(task, record);
+        if (record)
+          hook_.Start();
+      }
       SendResponse(conn, request_info, RESPONSE_OK, RESPONSE_OK_STR, task);
     } else if (strcmp(request_info->uri, "/event/load") == 0) {
       CString fixed_viewport = GetParam(request_info->query_string,
@@ -232,6 +249,8 @@ void TestServer::MongooseCallback(enum mg_event event,
         test_state_.ActivityDetected();
         CString body = GetPostBody(conn, request_info);
         requests_.ProcessBrowserRequest(body);
+      } else {
+        OutputDebugStringA("Request data received while not active");
       }
       SendResponse(conn, request_info, RESPONSE_OK, RESPONSE_OK_STR, "");
     } else if (strcmp(request_info->uri, "/event/console_log") == 0) {
@@ -243,6 +262,9 @@ void TestServer::MongooseCallback(enum mg_event event,
     } else if (strcmp(request_info->uri, "/event/timed_event") == 0) {
       test_state_.AddTimedEvent(GetPostBody(conn, request_info));
       SendResponse(conn, request_info, RESPONSE_OK, RESPONSE_OK_STR, "");
+    } else if (strcmp(request_info->uri, "/event/custom_metrics") == 0) {
+      test_state_.SetCustomMetrics(GetPostBody(conn, request_info));
+      SendResponse(conn, request_info, RESPONSE_OK, RESPONSE_OK_STR, "");
     } else if (strcmp(request_info->uri, "/event/stats") == 0) {
       DWORD dom_count = 0;
       if (GetDwordParam(request_info->query_string, "domCount", dom_count) &&
@@ -250,19 +272,14 @@ void TestServer::MongooseCallback(enum mg_event event,
         test_state_._dom_element_count = dom_count;
       SendResponse(conn, request_info, RESPONSE_OK, RESPONSE_OK_STR, "");
     } else if (strcmp(request_info->uri, "/event/devTools") == 0) {
-      if (test_state_._active) {
-        CStringA body = CT2A(GetPostBody(conn, request_info));
-        if (body.GetLength())
-          dev_tools_.AddRawEvents(body);
-      }
+      CStringA body = CT2A(GetPostBody(conn, request_info));
+      if (body.GetLength())
+        dev_tools_.AddRawEvents(body);
       SendResponse(conn, request_info, RESPONSE_OK, RESPONSE_OK_STR, "");
     } else if (strcmp(request_info->uri, "/event/trace") == 0) {
-      if (test_state_._active) {
-        CStringA body = CT2A(GetPostBody(conn, request_info));
-        OutputDebugStringA(body);
-        if (body.GetLength())
-          trace_.AddEvents(body);
-      }
+      CStringA body = CT2A(GetPostBody(conn, request_info));
+      if (body.GetLength())
+        trace_.AddEvents(body);
       SendResponse(conn, request_info, RESPONSE_OK, RESPONSE_OK_STR, "");
     } else if (strcmp(request_info->uri, "/event/paint") == 0) {
       //test_state_.PaintEvent(0, 0, 0, 0);
@@ -278,6 +295,10 @@ void TestServer::MongooseCallback(enum mg_event event,
       GetIntParam(request_info->query_string, "viewportSpecified",
                   test_state_._viewport_specified);
       test_state_.CheckResponsive();
+      SendResponse(conn, request_info, RESPONSE_OK, RESPONSE_OK_STR, "");
+    } else if (strcmp(request_info->uri, "/event/debug") == 0) {
+      CStringA body = CT2A(GetPostBody(conn, request_info));
+      OutputDebugStringA(body);
       SendResponse(conn, request_info, RESPONSE_OK, RESPONSE_OK_STR, "");
     } else {
         // unknown command fall-through
@@ -434,7 +455,7 @@ CString TestServer::GetPostBody(struct mg_connection *conn,
           int bytes = mg_read(conn, buff, length);
           if (bytes && bytes <= length) {
             buff[bytes] = 0;
-            body += CA2T(buff);
+            body += CA2T(buff, CP_UTF8);
             length -= bytes;
           }
         }
@@ -444,4 +465,61 @@ CString TestServer::GetPostBody(struct mg_connection *conn,
   }
 
   return body;
+}
+
+bool TestServer::OkToStart() {
+  if (!started_) {
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    double elapsed = 0;
+    if (start_check_time_.QuadPart) {
+      if (now.QuadPart > start_check_time_.QuadPart &&
+          start_check_freq_.QuadPart > 0)
+        elapsed = (double)(now.QuadPart - start_check_time_.QuadPart) /
+                  (double)start_check_freq_.QuadPart;
+    } else {
+      start_check_time_.QuadPart = now.QuadPart;
+    }
+    if (elapsed > 30) {
+      started_ = true;
+    } else {
+      // calculate CPU utilization
+      FILETIME idle_time, kernel_time, user_time;
+      if (GetSystemTimes(&idle_time, &kernel_time, &user_time)) {
+        ULARGE_INTEGER k, u, i;
+        k.LowPart = kernel_time.dwLowDateTime;
+        k.HighPart = kernel_time.dwHighDateTime;
+        u.LowPart = user_time.dwLowDateTime;
+        u.HighPart = user_time.dwHighDateTime;
+        i.LowPart = idle_time.dwLowDateTime;
+        i.HighPart = idle_time.dwHighDateTime;
+        if(last_cpu_idle_.QuadPart || last_cpu_kernel_.QuadPart || 
+           last_cpu_user_.QuadPart) {
+          __int64 idle = i.QuadPart - last_cpu_idle_.QuadPart;
+          __int64 kernel = k.QuadPart - last_cpu_kernel_.QuadPart;
+          __int64 user = u.QuadPart - last_cpu_user_.QuadPart;
+          if (kernel || user) {
+            int cpu_utilization = (int)((((kernel + user) - idle) * 100) 
+                                          / (kernel + user));
+            if (cpu_utilization < 25)
+              started_ = true;
+          }
+        }
+        last_cpu_idle_.QuadPart = i.QuadPart;
+        last_cpu_kernel_.QuadPart = k.QuadPart;
+        last_cpu_user_.QuadPart = u.QuadPart;
+      }
+    }
+    if (started_) {
+      // Signal to wptdriver which process it should wait for and that we started
+      shared_browser_process_id = GetCurrentProcessId();
+      HANDLE browser_started_event = OpenEvent(EVENT_MODIFY_STATE , FALSE,
+                                                BROWSER_STARTED_EVENT);
+      if (browser_started_event) {
+        SetEvent(browser_started_event);
+        CloseHandle(browser_started_event);
+      }
+    }
+  }
+  return started_;
 }

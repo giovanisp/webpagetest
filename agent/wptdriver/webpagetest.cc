@@ -48,7 +48,8 @@ WebPagetest::WebPagetest(WptSettings &settings, WptStatus &status):
   ,_buildNo(0)
   ,_revisionNo(0)
   ,_exit(false)
-  ,has_gpu_(false) {
+  ,has_gpu_(false)
+  ,rebooting_(false) {
   SetErrorMode(SEM_FAILCRITICALERRORS);
   // get the version number of the binary (for software updates)
   TCHAR file[MAX_PATH];
@@ -62,10 +63,10 @@ WebPagetest::WebPagetest(WptSettings &settings, WptStatus &status):
         UINT size = 0;
         if( VerQueryValue(pVersion, _T("\\"), (LPVOID*)&info, &size) && info )
         {
-		      _majorVer = HIWORD(info->dwFileVersionMS);
-		      _minorVer = LOWORD(info->dwFileVersionMS);
-		      _buildNo = HIWORD(info->dwFileVersionLS);
-		      _revisionNo = LOWORD(info->dwFileVersionLS);
+          _majorVer = HIWORD(info->dwFileVersionMS);
+          _minorVer = LOWORD(info->dwFileVersionMS);
+          _buildNo = HIWORD(info->dwFileVersionLS);
+          _revisionNo = LOWORD(info->dwFileVersionLS);
         }
       }
 
@@ -97,11 +98,17 @@ WebPagetest::~WebPagetest(void) {
 bool WebPagetest::GetTest(WptTestDriver& test) {
   bool ret = false;
 
+  if (rebooting_) {
+    // We should never get here, but if we do make sure to keep trying to reboot
+    Reboot();
+    return false;
+  }
+
   DeleteDirectory(test._directory, false);
 
   // build the url for the request
   CString buff;
-  CString url = _settings._server + _T("work/getwork.php?shards=1");
+  CString url = _settings._server + _T("work/getwork.php?shards=1&reboot=1");
   url += CString(_T("&location=")) + _settings._location;
   if (_settings._key.GetLength())
     url += CString(_T("&key=")) + _settings._key;
@@ -115,6 +122,8 @@ bool WebPagetest::GetTest(WptTestDriver& test) {
     url += CString(_T("&pc=")) + _computer_name;
   if (_settings._ec2_instance.GetLength())
     url += CString(_T("&ec2=")) + _settings._ec2_instance;
+  if (_settings._azure_instance.GetLength())
+    url += CString(_T("&azure=")) + _settings._azure_instance;
   if (_dns_servers.GetLength())
     url += CString(_T("&dns=")) + _dns_servers;
   ULARGE_INTEGER fd;
@@ -128,7 +137,10 @@ bool WebPagetest::GetTest(WptTestDriver& test) {
   CString test_string, zip_file;
   if (HttpGet(url, test, test_string, zip_file)) {
     if (test_string.GetLength()) {
-      if (test.Load(test_string)) {
+      if (test_string == _T("Reboot")) {
+        rebooting_ = true;
+        Reboot();
+      } else if (test.Load(test_string)) {
         if (!test._client.IsEmpty())
           ret = GetClient(test);
         else
@@ -162,6 +174,8 @@ bool WebPagetest::DeleteIncrementalResults(WptTestDriver& test) {
 bool WebPagetest::UploadIncrementalResults(WptTestDriver& test) {
   bool ret = true;
 
+  AtlTrace(_T("[wptdriver] - UploadIncrementalResults"));
+
   if (!test._discard_test) {
     CString directory = test._directory + CString(_T("\\"));
     CAtlList<CString> image_files;
@@ -171,6 +185,8 @@ bool WebPagetest::UploadIncrementalResults(WptTestDriver& test) {
       ret = UploadData(test, false);
       SetCPUUtilization(0);
     }
+  } else {
+    DeleteIncrementalResults(test);
   }
 
   return ret;
@@ -191,6 +207,8 @@ bool WebPagetest::TestDone(WptTestDriver& test){
     ret = UploadData(test, true);
     SetCPUUtilization(0);
   }
+
+  AtlTrace(_T("[wptdriver] - Test Done"));
 
   return ret;
 }
@@ -316,7 +334,7 @@ bool WebPagetest::HttpGet(CString url, WptTestDriver& test,
             } else {
               // NULL-terminate it and add it to our response string
               buff[bytes_read] = 0;
-              test_string += CA2T(buff);
+              test_string += CA2T(buff, CP_UTF8);
             }
           }
           if (file != INVALID_HANDLE_VALUE)
@@ -356,91 +374,103 @@ bool WebPagetest::UploadFile(CString url, bool done, WptTestDriver& test,
     }
   }
 
-  if (BuildFormData(_settings, test, done, file_name, file_size, 
-                      headers, footer, form_data, content_length)) {
-    // use WinInet to do the POST (quite a few steps)
-    HINTERNET internet = InternetOpen(_T("WebPagetest Driver"), 
-              INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
-    if (internet) {
-      DWORD timeout = 600000;
-      InternetSetOption(internet, INTERNET_OPTION_CONNECT_TIMEOUT,
-                        &timeout, sizeof(timeout));
-      InternetSetOption(internet, INTERNET_OPTION_RECEIVE_TIMEOUT,
-                        &timeout, sizeof(timeout));
-      InternetSetOption(internet, INTERNET_OPTION_SEND_TIMEOUT,
-                        &timeout, sizeof(timeout));
-      InternetSetOption(internet, INTERNET_OPTION_DATA_SEND_TIMEOUT,
-                        &timeout, sizeof(timeout));
-      InternetSetOption(internet, INTERNET_OPTION_DATA_RECEIVE_TIMEOUT,
-                        &timeout, sizeof(timeout));
+  AtlTrace(_T("[wptdriver] - Uploading '%s' (%d bytes) to '%s'"), (LPCTSTR)file, file_size, (LPCTSTR)url);
 
-      CString host, object;
-      unsigned short port;
-      DWORD secure_flag;
-      if (CrackUrl(url, host, port, object, secure_flag)) {
-        HINTERNET connect = InternetConnect(internet, host, port, NULL, NULL,
-                                            INTERNET_SERVICE_HTTP, 0, 0);
-        if (connect){
-          HINTERNET request = HttpOpenRequest(connect, _T("POST"), object, 
-                                                NULL, NULL, NULL, 
-                                                INTERNET_FLAG_NO_CACHE_WRITE |
-                                                INTERNET_FLAG_NO_UI |
-                                                INTERNET_FLAG_PRAGMA_NOCACHE |
-                                                INTERNET_FLAG_RELOAD |
-                                                INTERNET_FLAG_KEEP_CONNECTION |
-                                                secure_flag, NULL);
-          if (request){
-            if (HttpAddRequestHeaders(request, headers, headers.GetLength(), 
-                                      HTTP_ADDREQ_FLAG_ADD |
-                                      HTTP_ADDREQ_FLAG_REPLACE)) {
-              INTERNET_BUFFERS buffers;
-              memset( &buffers, 0, sizeof(buffers) );
-              buffers.dwStructSize = sizeof(buffers);
-              buffers.dwBufferTotal = content_length;
-              if (HttpSendRequestEx(request, &buffers, NULL, 0, NULL)) {
-                DWORD bytes_written;
-                if (InternetWriteFile(request, (LPCSTR)form_data, 
-                                      form_data.GetLength(), &bytes_written)) {
-                  // upload the file itself
-                  if (file_handle != INVALID_HANDLE_VALUE && file_size) {
-                      DWORD chunkSize = min(64 * 1024, file_size);
-                      LPBYTE mem = (LPBYTE)malloc(chunkSize);
-                      if (mem) {
-                        DWORD bytes;
-                        while (ReadFile(file_handle, mem, chunkSize, 
-                                                         &bytes, 0) && bytes) {
-                          InternetWriteFile(request, mem, bytes, 
-                                                            &bytes_written);
-                        }
-                        free(mem);
+  BuildFormData(_settings, test, done, file_name, file_size, 
+                headers, footer, form_data, content_length);
+
+  // use WinInet to do the POST (quite a few steps)
+  HINTERNET internet = InternetOpen(_T("WebPagetest Driver"), 
+            INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
+  if (internet) {
+    DWORD timeout = 600000;
+    InternetSetOption(internet, INTERNET_OPTION_CONNECT_TIMEOUT,
+                      &timeout, sizeof(timeout));
+    InternetSetOption(internet, INTERNET_OPTION_RECEIVE_TIMEOUT,
+                      &timeout, sizeof(timeout));
+    InternetSetOption(internet, INTERNET_OPTION_SEND_TIMEOUT,
+                      &timeout, sizeof(timeout));
+    InternetSetOption(internet, INTERNET_OPTION_DATA_SEND_TIMEOUT,
+                      &timeout, sizeof(timeout));
+    InternetSetOption(internet, INTERNET_OPTION_DATA_RECEIVE_TIMEOUT,
+                      &timeout, sizeof(timeout));
+
+    CString host, object;
+    unsigned short port;
+    DWORD secure_flag;
+    if (CrackUrl(url, host, port, object, secure_flag)) {
+      AtlTrace(_T("[wptdriver] - Connecting to '%s' port %d"), (LPCTSTR)host, port);
+      HINTERNET connect = InternetConnect(internet, host, port, NULL, NULL,
+                                          INTERNET_SERVICE_HTTP, 0, 0);
+      if (connect) {
+        AtlTrace(_T("[wptdriver] - POSTing to %s"), (LPCTSTR)object);
+        HINTERNET request = HttpOpenRequest(connect, _T("POST"), object, 
+                                              NULL, NULL, NULL, 
+                                              INTERNET_FLAG_NO_CACHE_WRITE |
+                                              INTERNET_FLAG_NO_UI |
+                                              INTERNET_FLAG_PRAGMA_NOCACHE |
+                                              INTERNET_FLAG_RELOAD |
+                                              INTERNET_FLAG_KEEP_CONNECTION |
+                                              secure_flag, NULL);
+        if (request) {
+          if (HttpAddRequestHeaders(request, headers, headers.GetLength(), 
+                                    HTTP_ADDREQ_FLAG_ADD |
+                                    HTTP_ADDREQ_FLAG_REPLACE)) {
+            INTERNET_BUFFERS buffers;
+            memset( &buffers, 0, sizeof(buffers) );
+            buffers.dwStructSize = sizeof(buffers);
+            buffers.dwBufferTotal = content_length;
+            AtlTrace(_T("[wptdriver] - Sending request"));
+            if (HttpSendRequestEx(request, &buffers, NULL, 0, NULL)) {
+              DWORD bytes_written;
+              AtlTrace(_T("[wptdriver] - Writing data"));
+              if (InternetWriteFile(request, (LPCSTR)form_data, 
+                                    form_data.GetLength(), &bytes_written)) {
+                AtlTrace(_T("[wptdriver] - Uploading the file"));
+                // upload the file itself
+                if (file_handle != INVALID_HANDLE_VALUE && file_size) {
+                    DWORD chunkSize = min(64 * 1024, file_size);
+                    LPBYTE mem = (LPBYTE)malloc(chunkSize);
+                    if (mem) {
+                      DWORD bytes;
+                      while (ReadFile(file_handle, mem, chunkSize, 
+                                                        &bytes, 0) && bytes) {
+                        InternetWriteFile(request, mem, bytes, 
+                                                          &bytes_written);
                       }
-                  }
-
-                  // upload the end of the form data
-                  if (InternetWriteFile(request, (LPCSTR)footer, 
-                                        footer.GetLength(), &bytes_written)) {
-                    if (HttpEndRequest(request, NULL, 0, 0)) {
-                      ret = true;
+                      free(mem);
                     }
+                }
+
+                // upload the end of the form data
+                if (InternetWriteFile(request, (LPCSTR)footer, 
+                                      footer.GetLength(), &bytes_written)) {
+                  if (HttpEndRequest(request, NULL, 0, 0)) {
+                    ret = true;
                   }
                 }
+              } else {
+                AtlTrace(_T("InternetWriteFile failed: %d"), GetLastError());
               }
+            } else {
+              AtlTrace(_T("HttpSendRequestEx failed: %d"), GetLastError());
             }
-            InternetCloseHandle(request);
           }
-          InternetCloseHandle(connect);
+          InternetCloseHandle(request);
         }
+        InternetCloseHandle(connect);
       }
-      InternetCloseHandle(internet);
     }
+    InternetCloseHandle(internet);
   }
 
-  if (file_handle != INVALID_HANDLE_VALUE) {
+  if (file_handle != INVALID_HANDLE_VALUE)
     CloseHandle( file_handle );
-  }
 
   if (ret)
     DeleteFile(file);
+
+  AtlTrace(_T("[wptdriver] - Upload %s"), ret ? _T("SUCCEEDED") : _T("FAILED"));
 
   return ret;
 }
@@ -481,8 +511,6 @@ bool WebPagetest::CrackUrl(CString url, CString &host, unsigned short &port,
       port = parts.nPort;
       object = path;
       object += extra;
-      if (!host.CompareNoCase(_T("www.webpagetest.org")))
-        host = _T("agent.webpagetest.org");
       if (!lstrcmpi(scheme, _T("https"))) {
         secure_flag = INTERNET_FLAG_SECURE |
                       INTERNET_FLAG_IGNORE_CERT_CN_INVALID |
@@ -498,13 +526,11 @@ bool WebPagetest::CrackUrl(CString url, CString &host, unsigned short &port,
 /*-----------------------------------------------------------------------------
   Build the form data for a POST (with an optional file)
 -----------------------------------------------------------------------------*/
-bool WebPagetest::BuildFormData(WptSettings& settings, WptTestDriver& test, 
+void WebPagetest::BuildFormData(WptSettings& settings, WptTestDriver& test, 
                             bool done,
                             CString file_name, DWORD file_size,
                             CString& headers, CStringA& footer, 
                             CStringA& form_data, DWORD& content_length){
-  bool ret = true;
-
   footer = "";
   form_data = "";
 
@@ -517,7 +543,7 @@ bool WebPagetest::BuildFormData(WptSettings& settings, WptTestDriver& test,
       guid.Data4[3],guid.Data4[4],guid.Data4[5],guid.Data4[6],guid.Data4[7]);
   
   headers = CString("Content-Type: multipart/form-data; boundary=") + 
-              CString(CA2T(boundary)) + _T("\r\n");
+              CString(CA2T(boundary, CP_UTF8)) + _T("\r\n");
 
   // location
   form_data += CStringA("--") + boundary + "\r\n";
@@ -585,6 +611,12 @@ bool WebPagetest::BuildFormData(WptSettings& settings, WptTestDriver& test,
     form_data += CStringA(CT2A(_settings._ec2_instance)) + "\r\n";
   }
 
+  if (_settings._azure_instance.GetLength()) {
+    form_data += CStringA("--") + boundary + "\r\n";
+    form_data += "Content-Disposition: form-data; name=\"azure\"\r\n\r\n";
+    form_data += CStringA(CT2A(_settings._azure_instance)) + "\r\n";
+  }
+
   // DNS servers
   if (!_dns_servers.IsEmpty()) {
     form_data += CStringA("--") + boundary + "\r\n";
@@ -616,8 +648,6 @@ bool WebPagetest::BuildFormData(WptSettings& settings, WptTestDriver& test,
   CString buff;
   buff.Format(_T("Content-Length: %u\r\n"), content_length);
   headers += buff;
-
-  return ret;
 }
 
 /*-----------------------------------------------------------------------------

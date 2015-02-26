@@ -42,8 +42,8 @@ foreach($compTests as $t) {
             $test['path'] = GetTestPath($test['id']);
             $test['pageData'] = loadAllPageData($test['path']);
 
-            $info = json_decode(gz_file_get_contents("./{$test['path']}/testinfo.json"), true);
-            if (isset($info) && is_array($info)) {
+            $info = GetTestInfo($test['id']);
+            if ($info) {
                 if (array_key_exists('discard', $info) &&
                     $info['discard'] >= 1 &&
                     array_key_exists('priority', $info) &&
@@ -109,13 +109,15 @@ foreach($compTests as $t) {
 $count = count($tests);
 if( $count ) {
     setcookie('fs', urlencode($_REQUEST['tests']));
+    setcookie('tid', $tests[0]['id']);
+    $id = $tests[0]['id'];
     LoadTestData();
 }
 else
     $error = "No valid tests selected.";
 
-if (array_key_exists('thumbSize', $_REQUEST))
-    $thumbSize = $_REQUEST['thumbSize'];
+if (array_key_exists('thumbSize', $_REQUEST) && is_numeric($_REQUEST['thumbSize']))
+    $thumbSize = intval($_REQUEST['thumbSize']);
 if( !isset($thumbSize) || $thumbSize < 50 || $thumbSize > 500 ) {
     if( $count > 6 )
         $thumbSize = 100;
@@ -162,10 +164,11 @@ function LoadTestData() {
             $test['url'] = $url;
         }
 
-        if( array_key_exists('label', $test) && strlen($test['label']) )
-            $test['name'] = $test['label'];
-        else {
-            $testInfo = json_decode(gz_file_get_contents("./$testPath/testinfo.json"), true);
+        if (array_key_exists('label', $test) && strlen($test['label'])) {
+          $test['name'] = $test['label'];
+        } else {
+          $testInfo = GetTestInfo($test['id']);
+          if ($testInfo && array_key_exists('label', $testInfo))
             $test['name'] = trim($testInfo['label']);
         }
 
